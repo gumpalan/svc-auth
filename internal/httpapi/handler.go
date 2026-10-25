@@ -31,8 +31,9 @@ func NewHandler(s *store.Store) http.Handler {
 }
 
 type registerRequest struct {
-	Name      string `json:"name"`
-	PublicKey string `json:"publicKey"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+	PublicKey   string `json:"publicKey"`
 }
 
 type registerResponse struct {
@@ -47,16 +48,32 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Idempotensi registrasi: jika fingerprint perangkat telah terdaftar sebelumnya,
+	// kembalikan entitas perangkat yang telah ada untuk mencegah duplikasi data.
+	if req.Fingerprint != "" {
+		existing, err := h.store.GetDeviceByFingerprint(r.Context(), req.Fingerprint)
+		if err == nil && existing != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(registerResponse{
+				DeviceID: existing.ID,
+				Status:   string(existing.Status),
+			})
+			return
+		}
+	}
+
 	b := make([]byte, 8)
 	_, _ = rand.Read(b)
 	devID := "dev_" + hex.EncodeToString(b)
 
 	dev := &device.Device{
-		ID:        devID,
-		Name:      req.Name,
-		PublicKey: req.PublicKey,
-		Status:    device.StatusPending,
-		CreatedAt: time.Now().Unix(),
+		ID:          devID,
+		Name:        req.Name,
+		Fingerprint: req.Fingerprint,
+		PublicKey:   req.PublicKey,
+		Status:      device.StatusPending,
+		CreatedAt:   time.Now().Unix(),
 	}
 
 	if err := h.store.CreateDevice(r.Context(), dev); err != nil {
@@ -73,9 +90,11 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 type deviceStatusResponse struct {
-	DeviceID string  `json:"deviceId"`
-	Status   string  `json:"status"`
-	Token    *string `json:"token"`
+	DeviceID  string  `json:"deviceId"`
+	Name      string  `json:"name"`
+	Status    string  `json:"status"`
+	CreatedAt int64   `json:"createdAt"`
+	Token     *string `json:"token"`
 }
 
 func (h *Handler) handleRegisterStatus(w http.ResponseWriter, r *http.Request) {
@@ -106,9 +125,11 @@ func (h *Handler) handleRegisterStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(deviceStatusResponse{
-		DeviceID: dev.ID,
-		Status:   string(dev.Status),
-		Token:    tokStr,
+		DeviceID:  dev.ID,
+		Name:      dev.Name,
+		Status:    string(dev.Status),
+		CreatedAt: dev.CreatedAt,
+		Token:     tokStr,
 	})
 }
 

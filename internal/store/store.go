@@ -30,34 +30,27 @@ func New(db *sql.DB, dialect database.Dialect) *Store {
 
 func (s *Store) CreateDevice(ctx context.Context, dev *device.Device) error {
 	q := database.Rebind(s.dialect, `
-		INSERT INTO auth_devices (id, name, public_key, status, created_at, approved_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO auth_devices (id, name, fingerprint, public_key, status, created_at, approved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`)
-	_, err := s.db.ExecContext(ctx, q, dev.ID, dev.Name, dev.PublicKey, string(dev.Status), dev.CreatedAt, dev.ApprovedAt)
+	fp := sql.NullString{String: dev.Fingerprint, Valid: dev.Fingerprint != ""}
+	_, err := s.db.ExecContext(ctx, q, dev.ID, dev.Name, fp, dev.PublicKey, string(dev.Status), dev.CreatedAt, dev.ApprovedAt)
 	if err != nil {
 		return fmt.Errorf("insert auth_devices: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) GetDevice(ctx context.Context, id string) (*device.Device, error) {
-	q := database.Rebind(s.dialect, `
-		SELECT id, name, public_key, status, created_at, approved_at
-		FROM auth_devices
-		WHERE id = ?
-	`)
-	row := s.db.QueryRowContext(ctx, q, id)
-
+func scanDevice(row interface{ Scan(...any) error }) (*device.Device, error) {
 	var dev device.Device
 	var st string
 	var appAt sql.NullInt64
-	if err := row.Scan(&dev.ID, &dev.Name, &dev.PublicKey, &st, &dev.CreatedAt, &appAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
-		}
-		return nil, fmt.Errorf("scan auth_device: %w", err)
+	var fp sql.NullString
+	if err := row.Scan(&dev.ID, &dev.Name, &fp, &dev.PublicKey, &st, &dev.CreatedAt, &appAt); err != nil {
+		return nil, err
 	}
 	dev.Status = device.Status(st)
+	dev.Fingerprint = fp.String
 	if appAt.Valid {
 		v := appAt.Int64
 		dev.ApprovedAt = &v
@@ -65,9 +58,45 @@ func (s *Store) GetDevice(ctx context.Context, id string) (*device.Device, error
 	return &dev, nil
 }
 
+func (s *Store) GetDevice(ctx context.Context, id string) (*device.Device, error) {
+	q := database.Rebind(s.dialect, `
+		SELECT id, name, fingerprint, public_key, status, created_at, approved_at
+		FROM auth_devices
+		WHERE id = ?
+	`)
+	row := s.db.QueryRowContext(ctx, q, id)
+	dev, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("scan auth_device: %w", err)
+	}
+	return dev, nil
+}
+
+// GetDeviceByFingerprint cari perangkat berdasarkan fingerprint unik.
+// Kembalikan ErrNotFound jika belum terdaftar.
+func (s *Store) GetDeviceByFingerprint(ctx context.Context, fingerprint string) (*device.Device, error) {
+	q := database.Rebind(s.dialect, `
+		SELECT id, name, fingerprint, public_key, status, created_at, approved_at
+		FROM auth_devices
+		WHERE fingerprint = ?
+	`)
+	row := s.db.QueryRowContext(ctx, q, fingerprint)
+	dev, err := scanDevice(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("scan auth_device by fingerprint: %w", err)
+	}
+	return dev, nil
+}
+
 func (s *Store) ListDevices(ctx context.Context) ([]device.Device, error) {
 	q := database.Rebind(s.dialect, `
-		SELECT id, name, public_key, status, created_at, approved_at
+		SELECT id, name, fingerprint, public_key, status, created_at, approved_at
 		FROM auth_devices
 		ORDER BY created_at DESC
 	`)
@@ -79,18 +108,11 @@ func (s *Store) ListDevices(ctx context.Context) ([]device.Device, error) {
 
 	var list []device.Device
 	for rows.Next() {
-		var dev device.Device
-		var st string
-		var appAt sql.NullInt64
-		if err := rows.Scan(&dev.ID, &dev.Name, &dev.PublicKey, &st, &dev.CreatedAt, &appAt); err != nil {
+		dev, err := scanDevice(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan list auth_device: %w", err)
 		}
-		dev.Status = device.Status(st)
-		if appAt.Valid {
-			v := appAt.Int64
-			dev.ApprovedAt = &v
-		}
-		list = append(list, dev)
+		list = append(list, *dev)
 	}
 	return list, rows.Err()
 }
@@ -150,29 +172,21 @@ func (s *Store) GetTokenByDeviceID(ctx context.Context, deviceID string) (*token
 
 func (s *Store) GetDeviceByToken(ctx context.Context, tokStr string) (*device.Device, error) {
 	q := database.Rebind(s.dialect, `
-		SELECT d.id, d.name, d.public_key, d.status, d.created_at, d.approved_at
+		SELECT d.id, d.name, d.fingerprint, d.public_key, d.status, d.created_at, d.approved_at
 		FROM auth_tokens t
 		JOIN auth_devices d ON t.device_id = d.id
 		WHERE t.token = ? AND (t.expires_at IS NULL OR t.expires_at > ?)
 	`)
 	now := time.Now().Unix()
 	row := s.db.QueryRowContext(ctx, q, tokStr, now)
-
-	var dev device.Device
-	var st string
-	var appAt sql.NullInt64
-	if err := row.Scan(&dev.ID, &dev.Name, &dev.PublicKey, &st, &dev.CreatedAt, &appAt); err != nil {
+	dev, err := scanDevice(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, fmt.Errorf("scan device by token: %w", err)
 	}
-	dev.Status = device.Status(st)
-	if appAt.Valid {
-		v := appAt.Int64
-		dev.ApprovedAt = &v
-	}
-	return &dev, nil
+	return dev, nil
 }
 
 func (s *Store) RevokeTokensByDeviceID(ctx context.Context, deviceID string) error {
