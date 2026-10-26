@@ -10,6 +10,7 @@ import (
 	"github.com/gumpalan/svc-auth/internal/device"
 	"github.com/gumpalan/svc-auth/internal/store"
 	"github.com/gumpalan/svc-auth/internal/token"
+	storeUser "github.com/gumpalan/svc-auth/internal/user"
 	"github.com/gumpalan/svc-auth/migrations"
 	_ "modernc.org/sqlite"
 )
@@ -95,5 +96,74 @@ func TestStore_DeviceCRUDAndToken(t *testing.T) {
 	_, err = s.GetDeviceByToken(ctx, "tok_1234567890")
 	if err == nil {
 		t.Fatal("expected error after token revocation, got nil")
+	}
+}
+
+func TestStore_UserAndRole(t *testing.T) {
+	db, s := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	// Default seeded roles check
+	adminRole, err := s.GetRoleByName(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetRoleByName admin: %v", err)
+	}
+	if adminRole.Name != "admin" || len(adminRole.AllowedModules) == 0 {
+		t.Fatalf("unexpected admin role: %+v", adminRole)
+	}
+
+	// Create User
+	now := time.Now().Unix()
+	u := &storeUser.User{
+		ID:           "usr_01",
+		Username:     "anomali",
+		PasswordHash: "hashed_secret",
+		RoleID:       adminRole.ID,
+		DisplayName:  "Anomali",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	if err := s.CreateUser(ctx, u); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	gotU, err := s.GetUserByUsername(ctx, "anomali")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if gotU.DisplayName != "Anomali" || gotU.Role == nil || gotU.Role.Name != "admin" {
+		t.Fatalf("unexpected user: %+v", gotU)
+	}
+
+	// Link device to user
+	dev := &device.Device{
+		ID:        "dev_user_01",
+		Name:      "Phone User",
+		PublicKey: "pubkey",
+		Status:    device.StatusApproved,
+		CreatedAt: now,
+		UserID:    &u.ID,
+	}
+	if err := s.CreateDevice(ctx, dev); err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	tok := &token.Token{
+		Token:     "tok_user_device",
+		DeviceID:  dev.ID,
+		CreatedAt: now,
+	}
+	if err := s.CreateToken(ctx, tok); err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	tokenUser, tokenDev, err := s.GetUserByToken(ctx, "tok_user_device")
+	if err != nil {
+		t.Fatalf("GetUserByToken: %v", err)
+	}
+	if tokenUser == nil || tokenUser.ID != "usr_01" || tokenDev.ID != "dev_user_01" {
+		t.Fatalf("unexpected user by token: %+v, %+v", tokenUser, tokenDev)
 	}
 }

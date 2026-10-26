@@ -16,4 +16,5 @@ type Device struct {
 	Status      Status  `json:"status"`
 	CreatedAt   int64   `json:"createdAt"`
 	ApprovedAt  *int64  `json:"approvedAt,omitempty"`
+	UserID      *string `json:"userId,omitempty"`
 }
